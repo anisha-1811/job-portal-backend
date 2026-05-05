@@ -37,47 +37,95 @@ exports.saveApplication = async (req, res) => {
          state=VALUES(state),pincode=VALUES(pincode),nationality=VALUES(nationality)`,
       [applicant_id,firstName,lastName,dob,gender,
        phone,address,city,state,pincode,nationality]
-    );
+    ); 
 
-    // ── 2. school_records ─────────────────────────────────────────────────────
-    await db.execute(
-      `INSERT INTO school_records
-         (applicant_id,tenth_board,tenth_marks,tenth_year,
-          twelfth_board,twelfth_marks,twelfth_year,school_gap_reason)
-       VALUES (?,?,?,?,?,?,?,?)
-       ON DUPLICATE KEY UPDATE
-         tenth_board=VALUES(tenth_board),tenth_marks=VALUES(tenth_marks),
-         tenth_year=VALUES(tenth_year),twelfth_board=VALUES(twelfth_board),
-         twelfth_marks=VALUES(twelfth_marks),twelfth_year=VALUES(twelfth_year),
-         school_gap_reason=VALUES(school_gap_reason)`,
-      [applicant_id,
-       tenthBoard||'',tenthMarks||'',tenthYear||2019,
-       twelthBoard||'',twelthMarks||'',twelthYear||2021,
-       schoolGapReason||null]
-    );
+    // ── qualifications (replaces degrees + school_records) ────────────────────
+await db.execute(
+  `DELETE FROM qualifications WHERE applicant_id = ?`,
+  [applicant_id]
+);
 
-    // ── 3. degrees (delete old, insert fresh) ─────────────────────────────────
-    await db.execute(
-      `DELETE FROM degrees WHERE applicant_id=?`, [applicant_id]
-    );
-    if (Array.isArray(degrees) && degrees.length > 0) {
-      for (let i = 0; i < Math.min(degrees.length, 3); i++) {
-        const d = degrees[i];
-        await db.execute(
-          `INSERT INTO degrees
-             (applicant_id,degree_order,degree_type,branch,
-              institution,cgpa,passing_year,gap_reason)
-           VALUES (?,?,?,?,?,?,?,?)`,
-          [applicant_id, i+1,
-           d.degree||d.degree_type||'',
-           d.branch||'',
-           d.institution||'',
-           d.cgpa||'',
-           d.passingYear||d.passing_year||2025,
-           d.gapReason||d.gap_reason||null]
-        );
-      }
-    }
+const quals = [];
+
+// Add Class X
+if (tenthBoard || tenthMarks) {
+  quals.push([
+    applicant_id, 'class_10', 1,
+    data.tenthInstitution || '',
+    tenthBoard || '',
+    'General',
+    tenthMarks || '',
+    'percentage',
+    data.tenthYear || null,
+    data.tenthYear || null,
+    0,
+    null
+  ]);
+}
+
+// Add Class XII
+if (twelthBoard || twelthMarks) {
+  quals.push([
+    applicant_id, 'class_12', 2,
+    data.twelthInstitution || '',
+    twelthBoard || '',
+    data.twelthStream || '',
+    twelthMarks || '',
+    'percentage',
+    data.twelthYear || null,
+    data.twelthYear || null,
+    0,
+    schoolGapReason || null
+  ]);
+}
+
+// Add all degrees dynamically
+const degreeTypeMap = {
+  'Diploma':  'diploma',
+  'B.Tech':   'undergraduate', 'B.E.':  'undergraduate',
+  'B.Sc':     'undergraduate', 'B.Com': 'undergraduate',
+  'B.A.':     'undergraduate', 'BCA':   'undergraduate',
+  'BBA':      'undergraduate',
+  'M.Tech':   'postgraduate',  'M.E.':  'postgraduate',
+  'M.Sc':     'postgraduate',  'MBA':   'postgraduate',
+  'MCA':      'postgraduate',  'M.A.':  'postgraduate',
+  'M.Com':    'postgraduate',
+  'Ph.D':     'doctorate',
+  'Other':    'other',
+};
+
+if (Array.isArray(degrees)) {
+  degrees.forEach((deg, i) => {
+    const qType = degreeTypeMap[deg.degree] || 'undergraduate';
+    const resultType = (deg.cgpa && deg.cgpa.toString().includes('.'))
+                       ? 'cgpa' : 'percentage';
+    quals.push([
+      applicant_id, qType, i + 3,
+      deg.institution || '',
+      deg.institution || '',
+      deg.branch || '',
+      deg.cgpa || '',
+      resultType,
+      null,
+      deg.passingYear || null,
+      0,
+      deg.gapReason || null
+    ]);
+  });
+}
+
+// Insert all qualifications
+for (const q of quals) {
+  await db.execute(
+    `INSERT IGNORE INTO qualifications
+       (applicant_id, qualification_type, display_order,
+        institution_name, board_university, field_of_study,
+        result_value, result_type, start_year, end_year,
+        is_ongoing, gap_reason)
+     VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
+    q
+  );
+}
 
     // ── 4. skills (delete old, insert fresh) ──────────────────────────────────
     await db.execute(`DELETE FROM skills WHERE applicant_id=?`,[applicant_id]);
