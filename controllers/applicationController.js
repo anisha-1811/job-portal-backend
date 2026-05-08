@@ -334,21 +334,21 @@ exports.getApplication = async (req, res) => {
 
     // FIX: Added degree_label (original label e.g. "B.Tech") and gap_reason to SELECT
     const [degrees] = await db.execute(
-      `SELECT
-          qualification_type AS degree_type,
-          degree_label       AS degree,       -- FIX: returns original label e.g. "B.Tech"
-          field_of_study     AS branch,
-          institution_name   AS institution,
-          result_value       AS cgpa,
-          end_year           AS passingYear,   -- FIX: camelCase to match deg.passingYear on frontend
-          display_order      AS degreeOrder,
-          gap_reason         AS gapReason     -- FIX: camelCase to match deg.gapReason on frontend
-       FROM qualifications
-       WHERE applicant_id=?
-         AND qualification_type NOT IN ('class_10', 'class_12')
-       ORDER BY display_order`,
-      [applicant_id]
-    );
+  `SELECT
+      qualification_type AS degree_type,
+      degree_label AS degree,
+      field_of_study AS branch,
+      institution_name AS institution,
+      result_value AS cgpa,
+      end_year AS passingYear,
+      display_order AS degreeOrder,
+      gap_reason AS gapReason
+   FROM qualifications
+   WHERE applicant_id=?
+     AND qualification_type NOT IN ('class_10', 'class_12')
+   ORDER BY display_order`,
+  [applicant_id]
+);
 
     const [skills]   = await db.execute(
       `SELECT skill_name FROM skills WHERE applicant_id=? ORDER BY skill_order`,
@@ -388,8 +388,18 @@ exports.getApplication = async (req, res) => {
         profileLinks:    links,
       }
     });
-  } catch (error) {
-    console.error("Get error:", error);
-    return res.status(500).json({ success: false, message: "Failed to fetch." });
+  }    catch (error) {
+    console.error("========== GET APPLICATION ERROR ==========");
+    console.error(error);
+    console.error(error.message);
+    console.error(error.sqlMessage);
+    console.error(error.sql);
+    console.error("==========================================");
+
+    return res.status(500).json({
+      success: false,
+      message: "Failed to fetch.",
+      error: error.message
+    });
   }
 };
