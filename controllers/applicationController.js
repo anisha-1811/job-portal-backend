@@ -259,7 +259,7 @@ exports.saveApplication = async (req, res) => {
     // ── 10. applications ──────────────────────────────────────────────────────
     // FIX: Stable code — APP-{applicant_id} never changes across updates.
     // ON DUPLICATE KEY UPDATE won't overwrite it with a new timestamp-based code.
-    const appCode = `APP-${applicant_id}`;
+    const appCode = applicant_id;
     await db.execute(
       `INSERT INTO applications
          (applicant_id,application_code,declaration_agreed,final_status)
