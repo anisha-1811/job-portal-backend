@@ -1,7 +1,35 @@
 const db = require("../config/db");
+const { body, validationResult } = require("express-validator");
+
+// ── Validation rules ──────────────────────────────────────────────────────────
+exports.saveValidation = [
+  body("firstName").notEmpty().trim().escape().withMessage("First name is required."),
+  body("lastName").notEmpty().trim().escape().withMessage("Last name is required."),
+  body("dob").notEmpty().isISO8601().withMessage("A valid date of birth is required."),
+  body("gender").notEmpty().trim().withMessage("Gender is required."),
+  body("phone")
+    .notEmpty()
+    .matches(/^[0-9+\-\s()]{7,20}$/)
+    .withMessage("A valid phone number is required."),
+  body("email").optional().isEmail().normalizeEmail(),
+  body("pincode").optional().matches(/^[0-9]{4,10}$/).withMessage("Invalid pincode."),
+  body("degrees").optional().isArray(),
+  body("skillsList").optional().isArray(),
+  body("experiences").optional().isArray(),
+  body("internshipsList").optional().isArray(),
+  body("projectsList").optional().isArray(),
+  body("certsList").optional().isArray(),
+  body("profileLinks").optional().isArray(),
+];
 
 // ── SAVE APPLICATION ──────────────────────────────────────────────────────────
 exports.saveApplication = async (req, res) => {
+  // Check validation results
+  const errors = validationResult(req);
+  if (!errors.isEmpty()) {
+    return res.status(400).json({ success: false, errors: errors.array() });
+  }
+
   const { applicant_id } = req.user;
   const {
     // Step 1
@@ -388,7 +416,7 @@ exports.getApplication = async (req, res) => {
         profileLinks:    links,
       }
     });
-  }    catch (error) {
+  } catch (error) {
     console.error("========== GET APPLICATION ERROR ==========");
     console.error(error);
     console.error(error.message);
