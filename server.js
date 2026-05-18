@@ -22,16 +22,14 @@ app.use(cors({
 app.use(express.json({ limit: "10mb" }));
 
 // ── Rate limiting ─────────────────────────────────────────────────────────────
-// Auth endpoints: stricter limit to prevent brute force
 const authLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 20,                   // max 20 requests per window per IP
+  windowMs: 15 * 60 * 1000,
+  max: 20,
   standardHeaders: true,
   legacyHeaders: false,
   message: { success: false, message: "Too many requests, please try again later." },
 });
 
-// General API: relaxed limit
 const apiLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   max: 100,
@@ -40,16 +38,27 @@ const apiLimiter = rateLimit({
   message: { success: false, message: "Too many requests, please try again later." },
 });
 
+// Gemini free tier: 15 requests/min — keep AI limiter generous but safe
+const aiLimiter = rateLimit({
+  windowMs: 60 * 1000,   // 1 minute window
+  max: 10,               // 10 AI requests per minute per IP
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { success: false, message: "AI rate limit reached. Please wait a moment." },
+});
+
 // ── Routes ────────────────────────────────────────────────────────────────────
 app.use("/api/auth",        authLimiter, require("./routes/auth"));
 app.use("/api/application", apiLimiter,  require("./routes/application"));
+app.use("/api/ai",          aiLimiter,   require("./routes/ai"));       // ✅ NEW
 
 // ── Health check ──────────────────────────────────────────────────────────────
 app.get("/", (req, res) => {
   res.json({
     success: true,
     message: "Job Portal Backend is running!",
-    version: "1.0.0"
+    version: "2.0.0",  // bumped — AI features added
+    ai: !!process.env.GEMINI_API_KEY ? "✅ Gemini connected" : "❌ GEMINI_API_KEY missing",
   });
 });
 
@@ -68,4 +77,5 @@ app.use((err, req, res, next) => {
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => {
   console.log(`🚀 Server running on http://localhost:${PORT}`);
+  console.log(`🤖 Gemini AI: ${process.env.GEMINI_API_KEY ? "✅ Ready" : "❌ GEMINI_API_KEY not set"}`);
 });
