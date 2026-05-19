@@ -70,106 +70,124 @@ function truncate(text, maxChars = 4000) {
 // POST /api/ai/generate-resume
 // Body: { formData } — ApplicationPage formData object
 // ─────────────────────────────────────────────────────────────────────────────
+// POST /api/ai/generate-resume
 router.post("/generate-resume", verifyToken, async (req, res) => {
   try {
-    const { formData } = req.body;
-    if (!formData) {
-      return res.status(400).json({ success: false, message: "formData is required." });
-    }
-
     const {
-      firstName = "", lastName = "",
-      phone = "", city = "", state = "",
-      degree = "", branch = "", institution = "", cgpa = "", passingYear = "",
-      skillsList = [],
-      experiences = [], internshipsList = [],
-      projectsList = [], certsList = [],
-      profileLinks = [],
-    } = formData;
-
-    const fullName = `${firstName} ${lastName}`.trim();
-
-    const formatExp = (arr) =>
-      arr.length === 0 ? "None" :
-      arr.map((e, i) =>
-        `${i + 1}. ${e.role} at ${e.company} ` +
-        `(${e.startDate} – ${e.currentlyWorking ? "Present" : e.endDate})\n` +
-        `   Skills: ${(e.skillsLearned || []).join(", ") || "N/A"}\n` +
-        `   ${e.description || ""}`
-      ).join("\n");
-
-    const formatProjects = () =>
-      projectsList.length === 0 ? "None" :
-      projectsList.map((p, i) =>
-        `${i + 1}. ${p.title}${p.url ? " (" + p.url + ")" : ""}\n` +
-        `   Tech: ${(p.techSkills || []).join(", ") || "N/A"}\n` +
-        `   ${p.description || ""}`
-      ).join("\n");
-
-    const formatCerts = () =>
-      certsList.length === 0 ? "None" :
-      certsList.map(c => `${c.name} — ${c.issuer} (${c.date || "N/A"})`).join(", ");
-
-    const formatLinks = () =>
-      profileLinks.filter(l => l.url).map(l => `${l.label}: ${l.url}`).join(" | ") || "None";
+      fullName, email, phone, location, linkedin, github,
+      summary, targetRole, tone = "professional",
+      skillsList = [], experiences = [],
+      internshipsList = [], projectsList = [], certsList = []
+    } = req.body;
 
     const prompt = `
-You are an expert resume writer specialising in ATS-optimised Indian tech resumes.
-Generate a professional resume from the data below.
+You are an expert resume writer specializing in ATS-optimized, ${tone} resumes.
 
-CANDIDATE:
-Name: ${fullName}
-Phone: ${phone}
-Location: ${city}, ${state}
-Links: ${formatLinks()}
+Generate a complete, polished resume for this candidate and return ONLY valid JSON — no markdown, no code fences, no explanation.
 
-EDUCATION:
-${degree} in ${branch} — ${institution} | CGPA: ${cgpa} | Year: ${passingYear}
+Candidate Details:
+- Name: ${fullName}
+- Email: ${email}
+- Phone: ${phone}
+- Location: ${location}
+- LinkedIn: ${linkedin || "N/A"}
+- GitHub: ${github || "N/A"}
+- Target Role: ${targetRole || "Not specified"}
+- Existing Summary: ${summary || "None provided"}
 
-TECHNICAL SKILLS:
-${skillsList.join(", ") || "Not specified"}
+Skills: ${skillsList.filter(Boolean).join(", ")}
 
-WORK EXPERIENCE:
-${formatExp(experiences)}
+Work Experience:
+${experiences.map((e, i) => `
+  ${i + 1}. ${e.role} at ${e.company} (${e.duration})
+  Details: ${e.description}
+`).join("")}
 
-INTERNSHIPS:
-${formatExp(internshipsList)}
+Internships:
+${internshipsList.length > 0 ? internshipsList.map((e, i) => `
+  ${i + 1}. ${e.role} at ${e.company} (${e.duration})
+  Details: ${e.description}
+`).join("") : "None"}
 
-PROJECTS:
-${formatProjects()}
+Projects:
+${projectsList.map((p, i) => `
+  ${i + 1}. ${p.name} — Tech: ${p.tech}
+  Details: ${p.description}
+`).join("")}
 
-CERTIFICATIONS & ACHIEVEMENTS:
-${formatCerts()}
+Certifications:
+${certsList.length > 0 ? certsList.map(c => `${c.name} by ${c.issuer} (${c.year})`).join(", ") : "None"}
 
-Return ONLY this JSON, no markdown fences, no preamble:
+Return this exact JSON structure (no extra fields, no markdown):
 {
-  "resumeText": "complete plain-text resume (600 words max, ATS-safe)",
-  "sections": {
-    "header": "name + contact line",
-    "education": "formatted education block",
-    "skills": "comma-separated skills string",
-    "experience": ["bullet 1", "bullet 2"],
-    "projects": ["Project: one-line description"],
-    "certifications": "formatted certs string"
-  }
+  "name": "string",
+  "email": "string",
+  "phone": "string",
+  "location": "string",
+  "linkedin": "string",
+  "github": "string",
+  "summary": "2-3 sentence ${tone} professional summary enhanced by AI",
+  "skills": ["skill1", "skill2", "...up to 15 skills"],
+  "experience": [
+    {
+      "company": "string",
+      "role": "string",
+      "duration": "string",
+      "bullets": ["action-verb achievement bullet 1", "bullet 2", "bullet 3"]
+    }
+  ],
+  "internships": [
+    {
+      "company": "string",
+      "role": "string",
+      "duration": "string",
+      "bullets": ["bullet 1", "bullet 2"]
+    }
+  ],
+  "projects": [
+    {
+      "name": "string",
+      "tech": "string",
+      "bullets": ["what it does", "your contribution", "impact or outcome"]
+    }
+  ],
+  "certifications": [
+    { "name": "string", "issuer": "string", "year": "string" }
+  ]
 }
 
 Rules:
-- Strong past-tense action verbs (Built, Developed, Designed, Reduced…).
-- Quantify achievements where possible; estimate if needed.
-- ATS-safe plain text only — no tables, graphics, or columns.
-- Max ~600 words.
-`.trim();
+- Bullets must start with strong action verbs (Developed, Implemented, Optimized, Led, Built...)
+- Quantify achievements wherever possible even if estimated (e.g., "Reduced load time by ~30%")
+- Make the summary compelling and tailored to the target role
+- Keep skills to real, relevant ones only
+- ATS-friendly: no tables, no graphics, clean structure
+`;
 
-    const data = await callGemini(prompt);
-    res.json({ success: true, ...data });
+    const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
+    const result = await model.generateContent(prompt);
+    const rawText = result.response.text();
 
-  } catch (err) {
-    console.error("❌ /generate-resume error:", err.message);
-    res.status(500).json({ success: false, message: err.message });
+    // Strip any accidental markdown fences
+    const cleanText = rawText
+      .replace(/```json\n?/g, "")
+      .replace(/```\n?/g, "")
+      .trim();
+
+    let resumeData;
+    try {
+      resumeData = JSON.parse(cleanText);
+    } catch {
+      // Fallback: return raw text if JSON parse fails
+      resumeData = { rawText: cleanText };
+    }
+
+    res.json({ success: true, data: resumeData });
+  } catch (error) {
+    console.error("Resume generation error:", error);
+    res.status(500).json({ success: false, error: "Failed to generate resume" });
   }
 });
-
 // ─────────────────────────────────────────────────────────────────────────────
 // Phase 3 — ATS Score Checker
 // POST /api/ai/ats-score
