@@ -10,11 +10,18 @@ const app = express();
 app.use(helmet());
 
 // ── CORS ──────────────────────────────────────────────────────────────────────
+const allowedOrigins = [
+  "http://localhost:3000",
+  process.env.FRONTEND_URL,                          // set in Railway/Render env vars
+  "https://job-application-portal-alpha.vercel.app", // old URL kept as fallback
+].filter(Boolean);
+
 app.use(cors({
-  origin: [
-    "http://localhost:3000",
-    "https://job-application-portal-alpha.vercel.app"
-  ],
+  origin: (origin, callback) => {
+    if (!origin) return callback(null, true); // allow Postman / curl
+    if (allowedOrigins.includes(origin)) return callback(null, true);
+    callback(new Error(`CORS: origin ${origin} not allowed`));
+  },
   credentials: true,
 }));
 
@@ -50,14 +57,14 @@ const aiLimiter = rateLimit({
 // ── Routes ────────────────────────────────────────────────────────────────────
 app.use("/api/auth",        authLimiter, require("./routes/auth"));
 app.use("/api/application", apiLimiter,  require("./routes/application"));
-app.use("/api/ai",          aiLimiter,   require("./routes/ai"));       // ✅ NEW
+app.use("/api/ai",          aiLimiter,   require("./routes/ai"));
 
 // ── Health check ──────────────────────────────────────────────────────────────
 app.get("/", (req, res) => {
   res.json({
     success: true,
     message: "Job Portal Backend is running!",
-    version: "2.0.0",  // bumped — AI features added
+    version: "2.0.0",
     ai: !!process.env.GEMINI_API_KEY ? "✅ Gemini connected" : "❌ GEMINI_API_KEY missing",
   });
 });
