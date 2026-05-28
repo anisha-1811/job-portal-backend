@@ -1,3 +1,4 @@
+// routes/ai.js  — Phase 1, 2, 3 (existing) + Phase 4 (job-match) added
 const express = require("express");
 const router = express.Router();
 const multer = require("multer");
@@ -18,7 +19,7 @@ const upload = multer({
   },
 });
 
-// ─── Helpers ────────────────────────────────────────────────────────────────
+// ─── Helpers ─────────────────────────────────────────────────────────────────
 
 async function callGemini(prompt) {
   const result = await model.generateContent(prompt);
@@ -26,14 +27,12 @@ async function callGemini(prompt) {
 }
 
 function safeParseJSON(text) {
-  // Strip markdown fences if Gemini wraps the JSON
   const cleaned = text.replace(/```json\n?/g, "").replace(/```\n?/g, "").trim();
   return JSON.parse(cleaned);
 }
 
-// ─── EXISTING ENDPOINTS (Phase 1 & 2) ────────────────────────────────────────
+// ─── PHASE 2 — AI Resume Generator ───────────────────────────────────────────
 
-// POST /api/ai/generate-resume
 router.post("/generate-resume", authMiddleware, async (req, res) => {
   try {
     const { formData } = req.body;
@@ -86,26 +85,16 @@ Return this exact JSON structure:
   }
 });
 
-// ─── PHASE 3: ATS SCORE CHECKER ──────────────────────────────────────────────
+// ─── PHASE 3 — ATS Score Checker ─────────────────────────────────────────────
 
-/**
- * POST /api/ai/ats-score
- * Body: multipart/form-data
- *   - resume: PDF file
- *   - jobDescription: string
- *   - jobTitle: string (optional)
- */
 router.post(
   "/ats-score",
   authMiddleware,
   upload.single("resume"),
   async (req, res) => {
     try {
-      // ── 1. Validate inputs ──────────────────────────────────────────────
       if (!req.file) {
-        return res
-          .status(400)
-          .json({ success: false, error: "Resume PDF is required." });
+        return res.status(400).json({ success: false, error: "Resume PDF is required." });
       }
       const { jobDescription, jobTitle = "the role" } = req.body;
       if (!jobDescription || jobDescription.trim().length < 50) {
@@ -115,26 +104,24 @@ router.post(
         });
       }
 
-      // ── 2. Extract text from PDF ────────────────────────────────────────
       let resumeText;
       try {
         const parsed = await pdfParse(req.file.buffer);
         resumeText = parsed.text.trim();
       } catch {
-        return res
-          .status(422)
-          .json({ success: false, error: "Could not parse PDF. Please ensure it is a text-based (non-scanned) PDF." });
+        return res.status(422).json({
+          success: false,
+          error: "Could not parse PDF. Please ensure it is a text-based (non-scanned) PDF.",
+        });
       }
 
       if (!resumeText || resumeText.length < 100) {
         return res.status(422).json({
           success: false,
-          error:
-            "Resume appears to be a scanned image PDF. Please upload a text-based PDF.",
+          error: "Resume appears to be a scanned image PDF. Please upload a text-based PDF.",
         });
       }
 
-      // ── 3. Build Gemini prompt ──────────────────────────────────────────
       const prompt = `
 You are an expert ATS (Applicant Tracking System) and technical recruiter.
 Analyze the resume against the job description and return a detailed ATS compatibility report.
@@ -177,21 +164,11 @@ Analyze thoroughly and return ONLY a valid JSON object (no markdown, no extra te
   ],
   "keyword_density": <float, percentage of JD keywords found in resume>,
   "estimated_shortlist_chance": "<Low | Medium | High | Very High>"
-}
+}`;
 
-Scoring guide:
-- keywords: how many JD keywords/phrases appear in the resume
-- experience: relevance and depth of work/project experience  
-- skills: technical and soft skill alignment
-- education: degree relevance
-- formatting: ATS parsability (no tables, columns, special chars that break parsing)
-`;
-
-      // ── 4. Call Gemini ──────────────────────────────────────────────────
       const raw = await callGemini(prompt);
       const atsResult = safeParseJSON(raw);
 
-      // ── 5. Attach metadata ──────────────────────────────────────────────
       atsResult.resume_filename = req.file.originalname;
       atsResult.analyzed_at = new Date().toISOString();
       atsResult.resume_word_count = resumeText.split(/\s+/).length;
@@ -204,19 +181,123 @@ Scoring guide:
   }
 );
 
-// ─── PHASE 6 STUBS (to be filled later) ──────────────────────────────────────
+// ─── PHASE 4 — AI Job Matching ────────────────────────────────────────────────
+// POST /api/ai/job-match
+// Body: { formData: { skillsList, experiences, ... }, jobListings: [...] }
+// Returns: sorted array of { jobId, matchScore, matchReasons, missingSkills, applyRecommendation }
 
-// POST /api/ai/cover-letter
+router.post("/job-match", authMiddleware, async (req, res) => {
+  try {
+    const { formData, jobListings } = req.body;
+
+    if (!formData || !Array.isArray(jobListings) || jobListings.length === 0) {
+      return res.status(400).json({
+        success: false,
+        error: "formData and a non-empty jobListings array are required.",
+      });
+    }
+
+    // Limit to avoid very long prompts; score max 10 at a time
+    const batchSize = Math.min(jobListings.length, 10);
+    const batch = jobListings.slice(0, batchSize);
+
+    const prompt = `
+You are an expert technical recruiter and career coach. Score how well a candidate matches each job listing.
+
+CANDIDATE PROFILE:
+${JSON.stringify(
+  {
+    skills: formData.skillsList || [],
+    targetRole: formData.targetRole || "",
+    experiences: (formData.experiences || []).map((e) => ({
+      role: e.role,
+      company: e.company,
+      description: e.description,
+    })),
+    internships: (formData.internshipsList || []).map((i) => ({
+      role: i.role,
+      company: i.company,
+    })),
+    projects: (formData.projectsList || []).map((p) => ({
+      name: p.name,
+      tech: p.tech,
+    })),
+    education: formData.degrees || [],
+  },
+  null,
+  2
+)}
+
+JOB LISTINGS TO SCORE:
+${JSON.stringify(
+  batch.map((j) => ({
+    jobId: j.id,
+    title: j.title,
+    company: j.company,
+    skills: j.skills,
+    experience: j.experience,
+    description: j.description,
+    requirements: j.requirements,
+  })),
+  null,
+  2
+)}
+
+For EACH job listing, analyze:
+1. Skill overlap (what skills match, what's missing)
+2. Experience level fit
+3. Overall match score
+
+Return ONLY a valid JSON array (no markdown, no extra text):
+
+[
+  {
+    "jobId": "job_001",
+    "matchScore": <integer 0-100>,
+    "matchReasons": ["reason 1 why they're a good fit", "reason 2"],
+    "missingSkills": ["skill they lack but job needs"],
+    "applyRecommendation": "<strong | moderate | stretch>",
+    "tip": "One specific action to improve chances for this role"
+  }
+]
+
+Scoring guide:
+- 80-100: strong match — most required skills present, good experience fit
+- 60-79: moderate match — some gaps but transferable skills
+- 40-59: stretch — significant gaps but worth trying
+- 0-39: poor fit — major skill/experience mismatch
+
+Return results sorted best match first (highest matchScore first).
+Return the array ONLY. No explanation text.`;
+
+    const raw = await callGemini(prompt);
+    const matches = safeParseJSON(raw);
+
+    // Sort by score descending (Gemini should already do this, but just in case)
+    const sorted = Array.isArray(matches)
+      ? matches.sort((a, b) => b.matchScore - a.matchScore)
+      : [];
+
+    res.json({ success: true, data: sorted });
+  } catch (err) {
+    console.error("job-match error:", err);
+    res.status(500).json({
+      success: false,
+      error: "AI job matching failed. Please try again.",
+    });
+  }
+});
+
+// ─── PHASE 6 STUBS ────────────────────────────────────────────────────────────
+
 router.post("/cover-letter", authMiddleware, async (req, res) => {
   res.json({ success: false, error: "Coming in Phase 6" });
 });
 
-// POST /api/ai/skill-gap
 router.post("/skill-gap", authMiddleware, async (req, res) => {
   res.json({ success: false, error: "Coming in Phase 6" });
 });
 
-// POST /api/ai/mock-interview
 router.post("/mock-interview", authMiddleware, async (req, res) => {
   res.json({ success: false, error: "Coming in Phase 6" });
 });
