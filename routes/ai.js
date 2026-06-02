@@ -1,4 +1,4 @@
-// routes/ai.js  — Phase 1, 2, 3 (existing) + Phase 4 (job-match) added
+// routes/ai.js
 const express = require("express");
 const router = express.Router();
 const multer = require("multer");
@@ -9,17 +9,17 @@ const authMiddleware = require("../middleware/verifyToken");
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
 
-// Multer — memory storage (no disk writes)
+// Multer — memory storage
 const upload = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: 5 * 1024 * 1024 }, // 5 MB cap
+  limits: { fileSize: 5 * 1024 * 1024 },
   fileFilter: (req, file, cb) => {
     if (file.mimetype === "application/pdf") cb(null, true);
     else cb(new Error("Only PDF files are allowed"), false);
   },
 });
 
-// ─── Helpers ─────────────────────────────────────────────────────────────────
+// ─── Helpers ──────────────────────────────────────────────────────────────────
 
 async function callGemini(prompt) {
   const result = await model.generateContent(prompt);
@@ -29,6 +29,47 @@ async function callGemini(prompt) {
 function safeParseJSON(text) {
   const cleaned = text.replace(/```json\n?/g, "").replace(/```\n?/g, "").trim();
   return JSON.parse(cleaned);
+}
+
+// ─── OCR fallback: extract text from scanned/image PDF ───────────────────────
+async function extractTextFromPDF(buffer) {
+  // Step 1: try normal text extraction
+  try {
+    const parsed = await pdfParse(buffer);
+    const text = parsed.text.trim();
+    if (text && text.length >= 100) {
+      console.log("✅ PDF text extracted normally");
+      return text;
+    }
+  } catch (e) {
+    console.log("⚠️ Normal PDF parse failed, trying OCR...");
+  }
+
+  // Step 2: fallback to OCR via Gemini Vision (no extra packages needed)
+  console.log("🔍 Running OCR via Gemini Vision...");
+  try {
+    const base64PDF = buffer.toString("base64");
+    const result = await model.generateContent([
+      {
+        inlineData: {
+          mimeType: "application/pdf",
+          data: base64PDF,
+        },
+      },
+      {
+        text: "Extract ALL text content from this PDF/image exactly as it appears. Include every word, number, and section. Output only the raw extracted text, nothing else.",
+      },
+    ]);
+    const ocrText = result.response.text().trim();
+    if (ocrText && ocrText.length >= 50) {
+      console.log("✅ OCR text extracted via Gemini Vision");
+      return ocrText;
+    }
+  } catch (e) {
+    console.error("❌ Gemini OCR failed:", e.message);
+  }
+
+  throw new Error("Could not extract text from PDF using any method.");
 }
 
 // ─── PHASE 2 — AI Resume Generator ───────────────────────────────────────────
@@ -85,7 +126,7 @@ Return this exact JSON structure:
   }
 });
 
-// ─── PHASE 3 — ATS Score Checker ─────────────────────────────────────────────
+// ─── PHASE 3 — ATS Score Checker (with OCR fallback) ─────────────────────────
 
 router.post(
   "/ats-score",
@@ -96,6 +137,7 @@ router.post(
       if (!req.file) {
         return res.status(400).json({ success: false, error: "Resume PDF is required." });
       }
+
       const { jobDescription, jobTitle = "the role" } = req.body;
       if (!jobDescription || jobDescription.trim().length < 50) {
         return res.status(400).json({
@@ -104,21 +146,38 @@ router.post(
         });
       }
 
+      // ✅ Extract text with automatic OCR fallback for scanned PDFs
       let resumeText;
+      let usedOCR = false;
       try {
+        // First try normal extraction
         const parsed = await pdfParse(req.file.buffer);
         resumeText = parsed.text.trim();
-      } catch {
-        return res.status(422).json({
-          success: false,
-          error: "Could not parse PDF. Please ensure it is a text-based (non-scanned) PDF.",
-        });
+
+        // If text is too short, it's likely a scanned PDF — use OCR
+        if (!resumeText || resumeText.length < 100) {
+          console.log("📄 Scanned PDF detected, switching to OCR...");
+          resumeText = await extractTextFromPDF(req.file.buffer);
+          usedOCR = true;
+        }
+      } catch (e) {
+        // Normal parse failed completely — try OCR
+        console.log("📄 PDF parse failed, trying OCR...");
+        try {
+          resumeText = await extractTextFromPDF(req.file.buffer);
+          usedOCR = true;
+        } catch (ocrErr) {
+          return res.status(422).json({
+            success: false,
+            error: "Could not read this PDF. Please try exporting it from Word or Google Docs.",
+          });
+        }
       }
 
-      if (!resumeText || resumeText.length < 100) {
+      if (!resumeText || resumeText.length < 50) {
         return res.status(422).json({
           success: false,
-          error: "Resume appears to be a scanned image PDF. Please upload a text-based PDF.",
+          error: "Could not extract enough text from this PDF. Please try a different file.",
         });
       }
 
@@ -172,6 +231,7 @@ Analyze thoroughly and return ONLY a valid JSON object (no markdown, no extra te
       atsResult.resume_filename = req.file.originalname;
       atsResult.analyzed_at = new Date().toISOString();
       atsResult.resume_word_count = resumeText.split(/\s+/).length;
+      atsResult.ocr_used = usedOCR; // tells frontend if OCR was used
 
       res.json({ success: true, data: atsResult });
     } catch (err) {
@@ -182,9 +242,6 @@ Analyze thoroughly and return ONLY a valid JSON object (no markdown, no extra te
 );
 
 // ─── PHASE 4 — AI Job Matching ────────────────────────────────────────────────
-// POST /api/ai/job-match
-// Body: { formData: { skillsList, experiences, ... }, jobListings: [...] }
-// Returns: sorted array of { jobId, matchScore, matchReasons, missingSkills, applyRecommendation }
 
 router.post("/job-match", authMiddleware, async (req, res) => {
   try {
@@ -197,7 +254,6 @@ router.post("/job-match", authMiddleware, async (req, res) => {
       });
     }
 
-    // Limit to avoid very long prompts; score max 10 at a time
     const batchSize = Math.min(jobListings.length, 10);
     const batch = jobListings.slice(0, batchSize);
 
@@ -243,37 +299,23 @@ ${JSON.stringify(
   2
 )}
 
-For EACH job listing, analyze:
-1. Skill overlap (what skills match, what's missing)
-2. Experience level fit
-3. Overall match score
-
 Return ONLY a valid JSON array (no markdown, no extra text):
 
 [
   {
     "jobId": "job_001",
     "matchScore": <integer 0-100>,
-    "matchReasons": ["reason 1 why they're a good fit", "reason 2"],
-    "missingSkills": ["skill they lack but job needs"],
+    "matchReasons": ["reason 1", "reason 2"],
+    "missingSkills": ["skill they lack"],
     "applyRecommendation": "<strong | moderate | stretch>",
     "tip": "One specific action to improve chances for this role"
   }
 ]
 
-Scoring guide:
-- 80-100: strong match — most required skills present, good experience fit
-- 60-79: moderate match — some gaps but transferable skills
-- 40-59: stretch — significant gaps but worth trying
-- 0-39: poor fit — major skill/experience mismatch
-
-Return results sorted best match first (highest matchScore first).
-Return the array ONLY. No explanation text.`;
+Return results sorted best match first. Return the array ONLY.`;
 
     const raw = await callGemini(prompt);
     const matches = safeParseJSON(raw);
-
-    // Sort by score descending (Gemini should already do this, but just in case)
     const sorted = Array.isArray(matches)
       ? matches.sort((a, b) => b.matchScore - a.matchScore)
       : [];
@@ -281,18 +323,11 @@ Return the array ONLY. No explanation text.`;
     res.json({ success: true, data: sorted });
   } catch (err) {
     console.error("job-match error:", err);
-    res.status(500).json({
-      success: false,
-      error: "AI job matching failed. Please try again.",
-    });
+    res.status(500).json({ success: false, error: "AI job matching failed. Please try again." });
   }
 });
 
 // ─── PHASE 6 — Cover Letter Generator ────────────────────────────────────────
-// POST /api/ai/cover-letter
-// Body: { formData: { firstName, lastName, skillsList, experiences, ... },
-//         jobDetails: { title, company, description, hiringManager? },
-//         tone: 'professional' | 'friendly' | 'enthusiastic' }
 
 router.post("/cover-letter", authMiddleware, async (req, res) => {
   try {
@@ -306,15 +341,12 @@ router.post("/cover-letter", authMiddleware, async (req, res) => {
     }
 
     const candidateName =
-      [formData.firstName, formData.lastName].filter(Boolean).join(" ") ||
-      "Candidate";
+      [formData.firstName, formData.lastName].filter(Boolean).join(" ") || "Candidate";
 
     const toneGuide = {
-      professional: "formal, precise, and authoritative — ideal for corporate or enterprise roles",
-      friendly:
-        "warm, personable, and conversational — ideal for startups and creative teams",
-      enthusiastic:
-        "energetic, passionate, and forward-looking — ideal for high-growth companies",
+      professional: "formal, precise, and authoritative",
+      friendly: "warm, personable, and conversational",
+      enthusiastic: "energetic, passionate, and forward-looking",
     }[tone] || "professional";
 
     const prompt = `
@@ -336,9 +368,7 @@ Work Experience: ${JSON.stringify(
       2
     )}
 Education: ${JSON.stringify(formData.degrees || [], null, 2)}
-Projects: ${(formData.projectsList || [])
-      .map((p) => p.title || p.name)
-      .join(", ") || "Not provided"}
+Projects: ${(formData.projectsList || []).map((p) => p.title || p.name).join(", ") || "Not provided"}
 
 JOB DETAILS:
 Title: ${jobDetails.title}
@@ -346,15 +376,6 @@ Company: ${jobDetails.company}
 Hiring Manager: ${jobDetails.hiringManager || "Hiring Manager"}
 Job Description:
 ${(jobDetails.description || "").slice(0, 1500)}
-
-INSTRUCTIONS:
-- 3 clear paragraphs: (1) opening + why this role, (2) specific achievements + skills match, (3) closing + call to action
-- Opening: address "${jobDetails.hiringManager || "Hiring Manager"}" directly
-- Each paragraph: 3-5 sentences, tight and impactful
-- Weave in 2-3 specific skills from their profile that match the JD
-- End with a confident call-to-action
-- Do NOT use clichés like "I am writing to express..." or "I believe I am a perfect fit"
-- Total length: 250-350 words
 
 Return ONLY a valid JSON object (no markdown, no extra text):
 {
@@ -375,18 +396,13 @@ Return ONLY a valid JSON object (no markdown, no extra text):
 });
 
 // ─── PHASE 6 — Skill Gap Analyzer ────────────────────────────────────────────
-// POST /api/ai/skill-gap
-// Body: { currentSkills: string[], targetRole: string, jobDescription?: string }
 
 router.post("/skill-gap", authMiddleware, async (req, res) => {
   try {
     const { currentSkills = [], targetRole, jobDescription = "" } = req.body;
 
     if (!targetRole || targetRole.trim().length < 2) {
-      return res.status(400).json({
-        success: false,
-        error: "targetRole is required.",
-      });
+      return res.status(400).json({ success: false, error: "targetRole is required." });
     }
 
     const prompt = `
@@ -394,45 +410,29 @@ You are an expert tech career coach and skills assessor.
 Perform a detailed skill gap analysis for the candidate.
 
 TARGET ROLE: ${targetRole}
-
-CANDIDATE'S CURRENT SKILLS:
-${currentSkills.length ? currentSkills.join(", ") : "None provided"}
-
+CANDIDATE'S CURRENT SKILLS: ${currentSkills.length ? currentSkills.join(", ") : "None provided"}
 ${jobDescription ? `JOB DESCRIPTION:\n${jobDescription.slice(0, 1500)}` : ""}
 
-Analyze thoroughly and return ONLY a valid JSON object (no markdown, no extra text):
-
+Return ONLY a valid JSON object (no markdown, no extra text):
 {
-  "overallReadiness": <integer 0-100, how ready they are for the target role>,
+  "overallReadiness": <integer 0-100>,
   "readinessLabel": "<Not Ready | Developing | Almost Ready | Job Ready>",
   "strongSkills": ["skill1", "skill2"],
-  "partialSkills": [
-    { "skill": "skill name", "gap": "what specifically is missing or needs deepening" }
-  ],
-  "missingSkills": [
-    { "skill": "skill name", "priority": "high | medium | low", "reason": "why this matters for the role" }
-  ],
+  "partialSkills": [{ "skill": "name", "gap": "what is missing" }],
+  "missingSkills": [{ "skill": "name", "priority": "high | medium | low", "reason": "why it matters" }],
   "learningPath": [
     {
       "skill": "skill name",
-      "resource": "Specific course, book, or platform name",
+      "resource": "Specific course or platform",
       "type": "course | book | project | certification",
       "estimatedHours": <integer>,
-      "url": "https://... (real URL if you know it, otherwise omit)"
+      "url": "https://..."
     }
   ],
   "estimatedWeeksToReady": <integer>,
-  "keyInsight": "One sentence summary of the biggest gap and how to close it fast",
-  "quickWins": ["action 1 they can take this week", "action 2", "action 3"]
-}
-
-Scoring guide for overallReadiness:
-- 80-100: Job Ready — strong overlap
-- 60-79: Almost Ready — 1-2 key gaps
-- 40-59: Developing — several gaps but solid foundation
-- 0-39: Not Ready — major skills missing
-
-Return the JSON object ONLY. No explanation text.`;
+  "keyInsight": "One sentence summary",
+  "quickWins": ["action 1", "action 2", "action 3"]
+}`;
 
     const raw = await callGemini(prompt);
     const parsed = safeParseJSON(raw);
@@ -444,9 +444,6 @@ Return the JSON object ONLY. No explanation text.`;
 });
 
 // ─── PHASE 6 — Mock Interview Generator ──────────────────────────────────────
-// POST /api/ai/mock-interview
-// Body: { role: string, level: string, skills: string[],
-//         interviewType: 'technical'|'behavioural'|'mixed', numQuestions?: number }
 
 router.post("/mock-interview", authMiddleware, async (req, res) => {
   try {
@@ -469,19 +466,9 @@ You are a senior technical interviewer at a top tech company.
 Generate ${count} realistic interview questions for the following candidate.
 
 ROLE: ${role}
-LEVEL: ${level} (junior = 0-2 yrs, mid = 2-5 yrs, senior = 5+ yrs)
+LEVEL: ${level}
 INTERVIEW TYPE: ${interviewType}
 CANDIDATE SKILLS: ${skills.length ? skills.join(", ") : "general"}
-
-${
-  interviewType === "technical"
-    ? "Focus entirely on technical depth, coding concepts, system design, and problem-solving."
-    : interviewType === "behavioural"
-    ? "Focus on STAR-method behavioural questions about teamwork, conflict, leadership, and growth."
-    : "Mix: 60% technical questions about their skills, 40% behavioural questions."
-}
-
-For each question, provide a model answer tailored to a ${level}-level candidate.
 
 Return ONLY a valid JSON array (no markdown, no extra text):
 
@@ -491,15 +478,13 @@ Return ONLY a valid JSON array (no markdown, no extra text):
     "question": "The interview question",
     "type": "technical | behavioural | situational",
     "difficulty": "easy | medium | hard",
-    "category": "e.g. React Hooks / System Design / Teamwork / etc.",
-    "modelAnswer": "A thorough 3-5 sentence model answer appropriate for ${level} level",
-    "tips": ["tip 1 to answer this well", "tip 2", "tip 3"],
-    "followUp": "One likely follow-up question the interviewer might ask"
+    "category": "e.g. React Hooks / System Design",
+    "modelAnswer": "A thorough model answer",
+    "tips": ["tip 1", "tip 2", "tip 3"],
+    "followUp": "One likely follow-up question"
   }
 ]
 
-Vary difficulty: ~30% easy, ~50% medium, ~20% hard.
-Make questions specific to the candidate's skills where possible.
 Return the array ONLY. No explanation text.`;
 
     const raw = await callGemini(prompt);
