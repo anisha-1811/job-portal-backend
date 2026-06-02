@@ -1,4 +1,4 @@
-// server.js  — updated for Phase 4 (jobs route + env-based CORS)
+// server.js
 const express      = require("express");
 const cors         = require("cors");
 const helmet       = require("helmet");
@@ -11,16 +11,14 @@ const app = express();
 app.use(helmet());
 
 // ── CORS ──────────────────────────────────────────────────────────────────────
-// BUG FIX: was hardcoded Vercel URL → now uses FRONTEND_URL env var with fallback
 const allowedOrigins = [
   "http://localhost:3000",
-  process.env.FRONTEND_URL,                          // set this in Railway/Render env vars
-  "https://job-application-portal-alpha.vercel.app", // keep old URL as extra fallback
+  process.env.FRONTEND_URL,
+  "https://job-application-portal-alpha.vercel.app",
 ].filter(Boolean);
 
 app.use(cors({
   origin: (origin, callback) => {
-    // Allow requests with no origin (Postman, mobile apps, curl)
     if (!origin) return callback(null, true);
     if (allowedOrigins.includes(origin)) return callback(null, true);
     callback(new Error(`CORS: origin ${origin} not allowed`));
@@ -54,7 +52,7 @@ const aiLimiter = rateLimit({
 app.use("/api/auth",        authLimiter, require("./routes/auth"));
 app.use("/api/application", apiLimiter,  require("./routes/application"));
 app.use("/api/ai",          aiLimiter,   require("./routes/ai"));
-app.use("/api/jobs",        apiLimiter,  require("./routes/jobs"));   // ✅ Phase 4 NEW
+app.use("/api/jobs",        apiLimiter,  require("./routes/jobs"));
 
 // ── Health check ──────────────────────────────────────────────────────────────
 app.get("/", (req, res) => {
@@ -65,6 +63,20 @@ app.get("/", (req, res) => {
     ai: process.env.GEMINI_API_KEY ? "✅ Gemini connected" : "❌ GEMINI_API_KEY missing",
   });
 });
+
+// ── Keep-alive ping (prevents Render free tier from sleeping) ─────────────────
+// Pings itself every 14 minutes so the server never goes idle
+const BACKEND_URL = process.env.RENDER_EXTERNAL_URL || `http://localhost:${process.env.PORT || 5000}`;
+setInterval(async () => {
+  try {
+    const http = require("http");
+    const https = require("https");
+    const client = BACKEND_URL.startsWith("https") ? https : http;
+    client.get(`${BACKEND_URL}/`, () => {
+      console.log("🏓 Keep-alive ping sent");
+    }).on("error", () => {});
+  } catch (e) {}
+}, 14 * 60 * 1000); // every 14 minutes
 
 // ── 404 handler ───────────────────────────────────────────────────────────────
 app.use((req, res) => {
@@ -82,4 +94,5 @@ const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => {
   console.log(`🚀 Server running on http://localhost:${PORT}`);
   console.log(`🤖 Gemini AI: ${process.env.GEMINI_API_KEY ? "✅ Ready" : "❌ GEMINI_API_KEY not set"}`);
+  console.log(`🏓 Keep-alive: pinging ${BACKEND_URL} every 14 minutes`);
 });
