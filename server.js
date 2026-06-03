@@ -8,6 +8,7 @@ const app = express();
 
 // ── Security headers ──────────────────────────────────────────────────────────
 app.use(helmet());
+app.set("trust proxy", 1);
 
 // ── CORS ──────────────────────────────────────────────────────────────────────
 const allowedOrigins = [
