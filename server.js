@@ -1,4 +1,3 @@
-// server.js
 const express      = require("express");
 const cors         = require("cors");
 const helmet       = require("helmet");
@@ -37,15 +36,22 @@ const authLimiter = rateLimit({
 });
 
 const apiLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000, max: 100,
+  windowMs: 15 * 60 * 1000, max: 200,
   standardHeaders: true, legacyHeaders: false,
   message: { success: false, message: "Too many requests, please try again later." },
 });
 
+// ✅ Increased from 10 to 50 per minute — was causing false 500 errors during testing
 const aiLimiter = rateLimit({
-  windowMs: 60 * 1000, max: 10,
+  windowMs: 60 * 1000, max: 50,
   standardHeaders: true, legacyHeaders: false,
-  message: { success: false, message: "AI rate limit reached. Please wait a moment." },
+  // ✅ Returns 429 (not 500) so frontend shows a clear message
+  handler: (req, res) => {
+    res.status(429).json({
+      success: false,
+      message: "Too many AI requests. Please wait a moment and try again.",
+    });
+  },
 });
 
 // ── Routes ────────────────────────────────────────────────────────────────────
@@ -65,7 +71,6 @@ app.get("/", (req, res) => {
 });
 
 // ── Keep-alive ping (prevents Render free tier from sleeping) ─────────────────
-// Pings itself every 14 minutes so the server never goes idle
 const BACKEND_URL = process.env.RENDER_EXTERNAL_URL || `http://localhost:${process.env.PORT || 5000}`;
 setInterval(async () => {
   try {
@@ -76,7 +81,7 @@ setInterval(async () => {
       console.log("🏓 Keep-alive ping sent");
     }).on("error", () => {});
   } catch (e) {}
-}, 14 * 60 * 1000); // every 14 minutes
+}, 14 * 60 * 1000);
 
 // ── 404 handler ───────────────────────────────────────────────────────────────
 app.use((req, res) => {

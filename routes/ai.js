@@ -26,12 +26,41 @@ async function callGemini(prompt) {
   return result.response.text();
 }
 
+// ✅ Robust JSON extractor — handles ANY Gemini response format
+// Strips markdown, finds JSON array or object even if there's text around it
 function safeParseJSON(text) {
-  const cleaned = text.replace(/```json\n?/g, "").replace(/```\n?/g, "").trim();
-  return JSON.parse(cleaned);
+  // Step 1: strip markdown code fences
+  let cleaned = text
+    .replace(/```json\s*/gi, "")
+    .replace(/```\s*/gi, "")
+    .trim();
+
+  // Step 2: try direct parse first
+  try {
+    return JSON.parse(cleaned);
+  } catch (_) {}
+
+  // Step 3: extract JSON array [...] from anywhere in the text
+  const arrayMatch = cleaned.match(/\[[\s\S]*\]/);
+  if (arrayMatch) {
+    try {
+      return JSON.parse(arrayMatch[0]);
+    } catch (_) {}
+  }
+
+  // Step 4: extract JSON object {...} from anywhere in the text
+  const objectMatch = cleaned.match(/\{[\s\S]*\}/);
+  if (objectMatch) {
+    try {
+      return JSON.parse(objectMatch[0]);
+    } catch (_) {}
+  }
+
+  // Step 5: nothing worked
+  throw new Error(`Gemini returned non-JSON response: ${cleaned.slice(0, 100)}`);
 }
 
-// ─── OCR fallback: extract text from scanned/image PDF ───────────────────────
+// ─── OCR fallback: extract text from scanned/image PDF via Gemini Vision ─────
 async function extractTextFromPDF(buffer) {
   // Step 1: try normal text extraction
   try {
@@ -45,7 +74,7 @@ async function extractTextFromPDF(buffer) {
     console.log("⚠️ Normal PDF parse failed, trying OCR...");
   }
 
-  // Step 2: fallback to OCR via Gemini Vision (no extra packages needed)
+  // Step 2: fallback to Gemini Vision OCR
   console.log("🔍 Running OCR via Gemini Vision...");
   try {
     const base64PDF = buffer.toString("base64");
@@ -91,13 +120,13 @@ Return this exact JSON structure:
   "phone": "phone",
   "location": "city, state",
   "summary": "2-3 sentence professional summary",
-  "skills": ["skill1", "skill2", ...],
+  "skills": ["skill1", "skill2"],
   "experience": [
     {
       "title": "Job Title",
       "company": "Company Name",
       "duration": "Start - End",
-      "bullets": ["achievement 1", "achievement 2", "achievement 3"]
+      "bullets": ["achievement 1", "achievement 2"]
     }
   ],
   "projects": [
@@ -149,20 +178,15 @@ router.post(
       // ✅ Extract text with automatic OCR fallback for scanned PDFs
       let resumeText;
       let usedOCR = false;
+
       try {
-        // First try normal extraction
         const parsed = await pdfParse(req.file.buffer);
         resumeText = parsed.text.trim();
-
-        // If text is too short, it's likely a scanned PDF — use OCR
         if (!resumeText || resumeText.length < 100) {
-          console.log("📄 Scanned PDF detected, switching to OCR...");
           resumeText = await extractTextFromPDF(req.file.buffer);
           usedOCR = true;
         }
       } catch (e) {
-        // Normal parse failed completely — try OCR
-        console.log("📄 PDF parse failed, trying OCR...");
         try {
           resumeText = await extractTextFromPDF(req.file.buffer);
           usedOCR = true;
@@ -197,11 +221,11 @@ ${jobDescription.slice(0, 2000)}
 
 JOB TITLE: ${jobTitle}
 
-Analyze thoroughly and return ONLY a valid JSON object (no markdown, no extra text):
+Return ONLY a valid JSON object (no markdown, no extra text):
 
 {
   "overall_score": <integer 0-100>,
-  "grade": <"A" | "B" | "C" | "D" | "F">,
+  "grade": "<A|B|C|D|F>",
   "verdict": "<one sentence overall verdict>",
   "section_scores": {
     "keywords": <0-100>,
@@ -210,19 +234,18 @@ Analyze thoroughly and return ONLY a valid JSON object (no markdown, no extra te
     "education": <0-100>,
     "formatting": <0-100>
   },
-  "matched_keywords": ["keyword1", "keyword2", ...],
-  "missing_keywords": ["keyword1", "keyword2", ...],
-  "strengths": ["strength point 1", "strength point 2", "strength point 3"],
+  "matched_keywords": ["keyword1", "keyword2"],
+  "missing_keywords": ["keyword1", "keyword2"],
+  "strengths": ["strength 1", "strength 2", "strength 3"],
   "gaps": ["gap 1", "gap 2", "gap 3"],
   "suggestions": [
-    { "priority": "high", "action": "Specific actionable suggestion 1" },
-    { "priority": "high", "action": "Specific actionable suggestion 2" },
-    { "priority": "medium", "action": "Specific actionable suggestion 3" },
-    { "priority": "medium", "action": "Specific actionable suggestion 4" },
-    { "priority": "low", "action": "Specific actionable suggestion 5" }
+    { "priority": "high", "action": "Suggestion 1" },
+    { "priority": "high", "action": "Suggestion 2" },
+    { "priority": "medium", "action": "Suggestion 3" },
+    { "priority": "low", "action": "Suggestion 4" }
   ],
-  "keyword_density": <float, percentage of JD keywords found in resume>,
-  "estimated_shortlist_chance": "<Low | Medium | High | Very High>"
+  "keyword_density": <float>,
+  "estimated_shortlist_chance": "<Low|Medium|High|Very High>"
 }`;
 
       const raw = await callGemini(prompt);
@@ -231,7 +254,7 @@ Analyze thoroughly and return ONLY a valid JSON object (no markdown, no extra te
       atsResult.resume_filename = req.file.originalname;
       atsResult.analyzed_at = new Date().toISOString();
       atsResult.resume_word_count = resumeText.split(/\s+/).length;
-      atsResult.ocr_used = usedOCR; // tells frontend if OCR was used
+      atsResult.ocr_used = usedOCR;
 
       res.json({ success: true, data: atsResult });
     } catch (err) {
@@ -254,65 +277,38 @@ router.post("/job-match", authMiddleware, async (req, res) => {
       });
     }
 
-    const batchSize = Math.min(jobListings.length, 10);
-    const batch = jobListings.slice(0, batchSize);
+    const batch = jobListings.slice(0, 10);
 
     const prompt = `
-You are an expert technical recruiter and career coach. Score how well a candidate matches each job listing.
+You are an expert technical recruiter. Score how well a candidate matches each job listing.
 
 CANDIDATE PROFILE:
-${JSON.stringify(
-  {
-    skills: formData.skillsList || [],
-    targetRole: formData.targetRole || "",
-    experiences: (formData.experiences || []).map((e) => ({
-      role: e.role,
-      company: e.company,
-      description: e.description,
-    })),
-    internships: (formData.internshipsList || []).map((i) => ({
-      role: i.role,
-      company: i.company,
-    })),
-    projects: (formData.projectsList || []).map((p) => ({
-      name: p.name,
-      tech: p.tech,
-    })),
-    education: formData.degrees || [],
-  },
-  null,
-  2
-)}
+${JSON.stringify({
+  skills: formData.skillsList || [],
+  experiences: (formData.experiences || []).map((e) => ({ role: e.role, company: e.company })),
+  projects: (formData.projectsList || []).map((p) => ({ name: p.name, tech: p.tech })),
+}, null, 2)}
 
-JOB LISTINGS TO SCORE:
-${JSON.stringify(
-  batch.map((j) => ({
-    jobId: j.id,
-    title: j.title,
-    company: j.company,
-    skills: j.skills,
-    experience: j.experience,
-    description: j.description,
-    requirements: j.requirements,
-  })),
-  null,
-  2
-)}
+JOB LISTINGS:
+${JSON.stringify(batch.map((j) => ({
+  jobId: j.id,
+  title: j.title,
+  company: j.company,
+  skills: j.skills,
+  description: j.description,
+})), null, 2)}
 
-Return ONLY a valid JSON array (no markdown, no extra text):
-
+Return ONLY a valid JSON array:
 [
   {
     "jobId": "job_001",
-    "matchScore": <integer 0-100>,
+    "matchScore": <0-100>,
     "matchReasons": ["reason 1", "reason 2"],
-    "missingSkills": ["skill they lack"],
-    "applyRecommendation": "<strong | moderate | stretch>",
-    "tip": "One specific action to improve chances for this role"
+    "missingSkills": ["skill"],
+    "applyRecommendation": "<strong|moderate|stretch>",
+    "tip": "One specific action to improve chances"
   }
-]
-
-Return results sorted best match first. Return the array ONLY.`;
+]`;
 
     const raw = await callGemini(prompt);
     const matches = safeParseJSON(raw);
@@ -350,36 +346,18 @@ router.post("/cover-letter", authMiddleware, async (req, res) => {
     }[tone] || "professional";
 
     const prompt = `
-You are an expert career coach and professional cover letter writer.
-Write a compelling, personalised cover letter for the candidate below.
-
+You are an expert cover letter writer. Write a compelling cover letter.
 TONE: ${toneGuide}
+CANDIDATE: ${candidateName}
+SKILLS: ${(formData.skillsList || []).join(", ")}
+JOB TITLE: ${jobDetails.title}
+COMPANY: ${jobDetails.company}
+HIRING MANAGER: ${jobDetails.hiringManager || "Hiring Manager"}
+JOB DESCRIPTION: ${(jobDetails.description || "").slice(0, 1000)}
 
-CANDIDATE PROFILE:
-Name: ${candidateName}
-Skills: ${(formData.skillsList || []).join(", ") || "Not provided"}
-Work Experience: ${JSON.stringify(
-      (formData.experiences || []).map((e) => ({
-        role: e.role || e.company,
-        company: e.company,
-        description: e.description,
-      })),
-      null,
-      2
-    )}
-Education: ${JSON.stringify(formData.degrees || [], null, 2)}
-Projects: ${(formData.projectsList || []).map((p) => p.title || p.name).join(", ") || "Not provided"}
-
-JOB DETAILS:
-Title: ${jobDetails.title}
-Company: ${jobDetails.company}
-Hiring Manager: ${jobDetails.hiringManager || "Hiring Manager"}
-Job Description:
-${(jobDetails.description || "").slice(0, 1500)}
-
-Return ONLY a valid JSON object (no markdown, no extra text):
+Return ONLY a valid JSON object:
 {
-  "subject": "Application for ${jobDetails.title} – ${candidateName}",
+  "subject": "Application for ${jobDetails.title} - ${candidateName}",
   "salutation": "Dear ${jobDetails.hiringManager || "Hiring Manager"},",
   "paragraphs": ["paragraph1", "paragraph2", "paragraph3"],
   "closing": "Sincerely,\\n${candidateName}",
@@ -406,25 +384,23 @@ router.post("/skill-gap", authMiddleware, async (req, res) => {
     }
 
     const prompt = `
-You are an expert tech career coach and skills assessor.
-Perform a detailed skill gap analysis for the candidate.
-
+You are an expert tech career coach. Perform a skill gap analysis.
 TARGET ROLE: ${targetRole}
-CANDIDATE'S CURRENT SKILLS: ${currentSkills.length ? currentSkills.join(", ") : "None provided"}
-${jobDescription ? `JOB DESCRIPTION:\n${jobDescription.slice(0, 1500)}` : ""}
+CURRENT SKILLS: ${currentSkills.length ? currentSkills.join(", ") : "None"}
+${jobDescription ? `JOB DESCRIPTION: ${jobDescription.slice(0, 1000)}` : ""}
 
-Return ONLY a valid JSON object (no markdown, no extra text):
+Return ONLY a valid JSON object:
 {
-  "overallReadiness": <integer 0-100>,
-  "readinessLabel": "<Not Ready | Developing | Almost Ready | Job Ready>",
+  "overallReadiness": <0-100>,
+  "readinessLabel": "<Not Ready|Developing|Almost Ready|Job Ready>",
   "strongSkills": ["skill1", "skill2"],
   "partialSkills": [{ "skill": "name", "gap": "what is missing" }],
-  "missingSkills": [{ "skill": "name", "priority": "high | medium | low", "reason": "why it matters" }],
+  "missingSkills": [{ "skill": "name", "priority": "high|medium|low", "reason": "why it matters" }],
   "learningPath": [
     {
       "skill": "skill name",
       "resource": "Specific course or platform",
-      "type": "course | book | project | certification",
+      "type": "course|book|project|certification",
       "estimatedHours": <integer>,
       "url": "https://..."
     }
@@ -462,36 +438,32 @@ router.post("/mock-interview", authMiddleware, async (req, res) => {
     const count = Math.min(Math.max(parseInt(numQuestions) || 8, 4), 12);
 
     const prompt = `
-You are a senior technical interviewer at a top tech company.
-Generate ${count} realistic interview questions for the following candidate.
+You are a senior technical interviewer. Generate exactly ${count} interview questions.
 
 ROLE: ${role}
 LEVEL: ${level}
-INTERVIEW TYPE: ${interviewType}
-CANDIDATE SKILLS: ${skills.length ? skills.join(", ") : "general"}
+TYPE: ${interviewType}
+SKILLS: ${skills.length ? skills.join(", ") : "general"}
 
-Return ONLY a valid JSON array (no markdown, no extra text):
-
+Return ONLY a valid JSON array with exactly ${count} items. No other text:
 [
   {
     "id": 1,
     "question": "The interview question",
-    "type": "technical | behavioural | situational",
-    "difficulty": "easy | medium | hard",
-    "category": "e.g. React Hooks / System Design",
-    "modelAnswer": "A thorough model answer",
+    "type": "technical|behavioural|situational",
+    "difficulty": "easy|medium|hard",
+    "category": "e.g. React Hooks",
+    "modelAnswer": "A thorough model answer (3-5 sentences)",
     "tips": ["tip 1", "tip 2", "tip 3"],
     "followUp": "One likely follow-up question"
   }
-]
-
-Return the array ONLY. No explanation text.`;
+]`;
 
     const raw = await callGemini(prompt);
     const parsed = safeParseJSON(raw);
     res.json({ success: true, data: Array.isArray(parsed) ? parsed : [] });
   } catch (err) {
-    console.error("mock-interview error:", err);
+    console.error("mock-interview error:", err.message);
     res.status(500).json({ success: false, error: "Mock interview generation failed. Please try again." });
   }
 });
