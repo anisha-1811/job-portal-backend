@@ -73,3 +73,83 @@ exports.loginOrRegister = async (req, res) => {
     });
   }
 };
+
+// ── Login by API ID + Password ────────────────────────────────────────────────
+// POST /api/auth/login-by-id
+// Accepts: { applicant_id, password }
+// Looks up the applicant in MySQL, verifies password via Firebase REST API,
+// and returns the same JWT the normal flow returns.
+exports.loginByApiIdValidation = [
+  body("applicant_id").notEmpty().withMessage("API ID is required."),
+  body("password").notEmpty().withMessage("Password is required."),
+];
+
+exports.loginByApiId = async (req, res) => {
+  const errors = validationResult(req);
+  if (!errors.isEmpty()) {
+    return res.status(400).json({ success: false, errors: errors.array() });
+  }
+
+  try {
+    const { applicant_id, password } = req.body;
+
+    // 1. Find the applicant by API ID
+    const [rows] = await db.execute(
+      "SELECT applicant_id, firebase_uid, email, display_name FROM applicants WHERE applicant_id = ?",
+      [applicant_id.trim().toUpperCase()]
+    );
+
+    if (rows.length === 0) {
+      return res.status(401).json({ success: false, message: "Invalid API ID or password." });
+    }
+
+    const applicant = rows[0];
+
+    // 2. Verify password via Firebase REST sign-in endpoint
+    const firebaseApiKey = process.env.FIREBASE_API_KEY;
+    if (!firebaseApiKey) {
+      return res.status(500).json({ success: false, message: "Server misconfiguration: missing FIREBASE_API_KEY." });
+    }
+
+    const firebaseRes = await fetch(
+      `https://identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key=${firebaseApiKey}`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          email:             applicant.email,
+          password,
+          returnSecureToken: true,
+        }),
+      }
+    );
+
+    const firebaseData = await firebaseRes.json();
+
+    if (!firebaseRes.ok || firebaseData.error) {
+      // Firebase returns INVALID_PASSWORD or EMAIL_NOT_FOUND etc.
+      return res.status(401).json({ success: false, message: "Invalid API ID or password." });
+    }
+
+    // 3. Issue our own JWT (same shape as normal login)
+    const token = jwt.sign(
+      { applicant_id: applicant.applicant_id, email: applicant.email, firebase_uid: applicant.firebase_uid },
+      process.env.JWT_SECRET,
+      { expiresIn: "7d" }
+    );
+
+    console.log(`✅ API ID login: ${applicant.applicant_id}`);
+
+    return res.status(200).json({
+      success:      true,
+      message:      "Login successful",
+      token,
+      applicant_id: applicant.applicant_id,
+      email:        applicant.email,
+    });
+
+  } catch (err) {
+    console.error("loginByApiId error:", err);
+    return res.status(500).json({ success: false, message: "Server error during authentication." });
+  }
+};
